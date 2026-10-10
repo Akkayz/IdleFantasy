@@ -1,102 +1,183 @@
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import javax.xml.parsers.DocumentBuilderFactory
+
 plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
-    alias(libs.plugins.hilt)
+    alias(libs.plugins.jetbrains.compose)
     alias(libs.plugins.ksp)
 }
 
-android {
-    namespace = "com.fantasyidler"
-    compileSdk = 35
+group = "com.tristinbaker.idlefantasy"
+version = "1.15.7"
 
-    defaultConfig {
-        applicationId = "com.tristinbaker.idlefantasy"
-        minSdk = 26
-        targetSdk = 35
-        versionCode = 157000
-        versionName = "1.15.7"
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
 
-        // Nightly channel (-PnightlyBuild=N): publishes as <stable>.N with
-        // versionCode <stableCode>+N. Requires the thousands versionCode
-        // scheme (stable releases at multiples of 1000, first used for 1.14.2
-        // = 141000) so every stable release outranks its preceding nightlies.
-        (project.findProperty("nightlyBuild") as String?)?.let { raw ->
-            val n = raw.toIntOrNull()
-            require(n != null && n in 1..999) { "nightlyBuild must be 1..999, got '$raw'" }
-            require(versionCode!! % 1000 == 0) {
-                "Nightly builds require the thousands versionCode scheme; found $versionCode"
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+}
+
+val generatedDesktopDir = layout.buildDirectory.dir("generated/desktop/kotlin")
+
+sourceSets {
+    main {
+        kotlin.srcDir("src/main/kotlin")
+        kotlin.srcDir(generatedDesktopDir)
+        resources.srcDir("src/main/assets")
+    }
+    test {
+        kotlin.srcDir("src/test/kotlin")
+    }
+}
+
+val generateDesktopSources by tasks.registering {
+    val resDir = file("src/main/res")
+    val outDir = generatedDesktopDir
+    inputs.dir(resDir)
+    outputs.dir(outDir)
+
+    doLast {
+        val pkgDir = outDir.get().asFile.resolve("com/fantasyidler")
+        pkgDir.mkdirs()
+
+        // 1. Generate BuildConfig.kt
+        pkgDir.resolve("BuildConfig.kt").writeText(
+            """
+            package com.fantasyidler
+
+            object BuildConfig {
+                const val DEBUG: Boolean = true
+                const val APPLICATION_ID: String = "com.tristinbaker.idlefantasy"
+                const val BUILD_TYPE: String = "debug"
+                const val VERSION_CODE: Int = 157000
+                const val VERSION_NAME: String = "1.15.7"
             }
-            versionCode = versionCode!! + n
-            versionName = "$versionName.$n"
-        }
-    }
+            """.trimIndent() + "\n"
+        )
 
-    dependenciesInfo {
-        includeInApk = false
-        includeInBundle = false
-    }
+        // 2. Collect strings, plurals, arrays from res/values/*.xml
+        val stringNames = sortedSetOf<String>()
+        val pluralNames = sortedSetOf<String>()
+        val arrayNames = sortedSetOf<String>()
+        val dbf = DocumentBuilderFactory.newInstance()
 
-    signingConfigs {
-        create("release") {
-            storeFile     = file("${System.getProperty("user.home")}/.android/defide-release.jks")
-            storePassword = System.getenv("DEFIDE_STORE_PASSWORD") ?: ""
-            keyAlias      = "defide"
-            keyPassword   = System.getenv("DEFIDE_KEY_PASSWORD") ?: ""
-        }
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = true
-            signingConfig   = signingConfigs.getByName("release")
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro",
-            )
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    buildFeatures {
-        compose = true
-        buildConfig = true
-    }
-
-    applicationVariants.all {
-        val vName = versionName
-        outputs.all {
-            if (this is com.android.build.gradle.internal.api.BaseVariantOutputImpl &&
-                buildType.name == "release"
-            ) {
-                outputFileName = "IdleFantasy-v$vName.apk"
+        resDir.listFiles { f -> f.isDirectory && f.name.startsWith("values") }?.forEach { valDir ->
+            valDir.listFiles { f -> f.isFile && f.extension == "xml" }?.forEach { xmlFile ->
+                try {
+                    val doc = dbf.newDocumentBuilder().parse(xmlFile)
+                    val root = doc.documentElement
+                    val children = root.childNodes
+                    for (i in 0 until children.length) {
+                        val node = children.item(i)
+                        val attrName = node.attributes?.getNamedItem("name")?.nodeValue ?: continue
+                        when (node.nodeName) {
+                            "string" -> stringNames.add(attrName)
+                            "plurals" -> pluralNames.add(attrName)
+                            "string-array" -> arrayNames.add(attrName)
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to parse resource XML ${xmlFile.path}: ${e.message}")
+                }
             }
         }
-    }
 
-    lint {
-        // Existing issues are captured in lint-baseline.xml so CI fails only on
-        // NEW problems introduced by future changes, without forcing a cleanup of
-        // the pre-existing backlog. Regenerate by deleting the baseline and
-        // running `./gradlew lintDebug`.
-        baseline = file("lint-baseline.xml")
-        warningsAsErrors = false
-        warning += listOf("MissingTranslation", "MissingQuantity")
-    }
+        // 3. Collect drawables from res/drawable*
+        val drawableNames = sortedSetOf<String>()
+        resDir.listFiles { f -> f.isDirectory && f.name.startsWith("drawable") }?.forEach { drawDir ->
+            drawDir.listFiles { f -> f.isFile }?.forEach { df ->
+                val baseName = df.name.substringBeforeLast('.')
+                if (baseName.matches(Regex("[a-zA-Z_][a-zA-Z0-9_]*"))) {
+                    drawableNames.add(baseName)
+                }
+            }
+        }
 
-    testOptions {
-        // Let Robolectric (Room migration tests) access Android resources.
-        unitTests.isIncludeAndroidResources = true
+        val sb = StringBuilder()
+        sb.appendLine("package com.fantasyidler")
+        sb.appendLine()
+        sb.appendLine("object R {")
+
+        // object string
+        sb.appendLine("    object string {")
+        stringNames.forEachIndexed { index, name ->
+            val id = 0x7f010001 + index
+            sb.appendLine("        const val `$name`: Int = $id")
+        }
+        sb.appendLine("    }")
+
+        // object plurals
+        sb.appendLine("    object plurals {")
+        pluralNames.forEachIndexed { index, name ->
+            val id = 0x7f020001 + index
+            sb.appendLine("        const val `$name`: Int = $id")
+        }
+        sb.appendLine("    }")
+
+        // object array
+        sb.appendLine("    object array {")
+        arrayNames.forEachIndexed { index, name ->
+            val id = 0x7f030001 + index
+            sb.appendLine("        const val `$name`: Int = $id")
+        }
+        sb.appendLine("    }")
+
+        // object drawable
+        sb.appendLine("    object drawable {")
+        drawableNames.forEachIndexed { index, name ->
+            val id = 0x7f040001 + index
+            sb.appendLine("        const val `$name`: Int = $id")
+        }
+        sb.appendLine("    }")
+
+        // Lookup maps via reflection over const val fields (avoids 64KB JVM method bytecode limit)
+        sb.appendLine("    val stringIdToName: Map<Int, String> by lazy {")
+        sb.appendLine("        string::class.java.declaredFields")
+        sb.appendLine("            .filter { it.type == Int::class.javaPrimitiveType }")
+        sb.appendLine("            .associate { it.getInt(null) to it.name }")
+        sb.appendLine("    }")
+        sb.appendLine("    val stringNameToId: Map<String, Int> by lazy {")
+        sb.appendLine("        stringIdToName.entries.associate { (k, v) -> v to k }")
+        sb.appendLine("    }")
+        sb.appendLine("    val pluralsIdToName: Map<Int, String> by lazy {")
+        sb.appendLine("        plurals::class.java.declaredFields")
+        sb.appendLine("            .filter { it.type == Int::class.javaPrimitiveType }")
+        sb.appendLine("            .associate { it.getInt(null) to it.name }")
+        sb.appendLine("    }")
+        sb.appendLine("    val arrayIdToName: Map<Int, String> by lazy {")
+        sb.appendLine("        array::class.java.declaredFields")
+        sb.appendLine("            .filter { it.type == Int::class.javaPrimitiveType }")
+        sb.appendLine("            .associate { it.getInt(null) to it.name }")
+        sb.appendLine("    }")
+        sb.appendLine("    val drawableIdToName: Map<Int, String> by lazy {")
+        sb.appendLine("        drawable::class.java.declaredFields")
+        sb.appendLine("            .filter { it.type == Int::class.javaPrimitiveType }")
+        sb.appendLine("            .associate { it.getInt(null) to it.name }")
+        sb.appendLine("    }")
+        sb.appendLine("    val drawableNameToId: Map<String, Int> by lazy {")
+        sb.appendLine("        drawableIdToName.entries.associate { (k, v) -> v to k }")
+        sb.appendLine("    }")
+        sb.appendLine("}")
+        pkgDir.resolve("R.kt").writeText(sb.toString())
     }
+}
+
+tasks.named<Copy>("processResources") {
+    from("src/main/res") {
+        into("res")
+    }
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(generateDesktopSources)
+}
+
+tasks.matching { it.name == "kspKotlin" || it.name == "kspTestKotlin" }.configureEach {
+    dependsOn(generateDesktopSources)
 }
 
 // Export Room schema files so migrations can be verified and reviewed in version control.
@@ -106,50 +187,44 @@ ksp {
 }
 
 dependencies {
-    // Core
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.lifecycle.runtime.compose)
-    implementation(libs.androidx.activity.compose)
+    // Compose Desktop
+    implementation(compose.desktop.currentOs)
+    implementation(compose.ui)
+    implementation(compose.foundation)
+    implementation(compose.material3)
+    implementation(compose.materialIconsExtended)
+    implementation(compose.components.resources)
 
-    // Compose
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.material.icons)
-    debugImplementation(libs.androidx.compose.ui.tooling)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    // Lifecycle & Navigation Multiplatform (JVM Desktop)
+    implementation(libs.jetbrains.lifecycle.viewmodel.compose)
+    implementation(libs.jetbrains.lifecycle.runtime.compose)
+    implementation(libs.jetbrains.navigation.compose)
 
-    // Navigation
-    implementation(libs.androidx.navigation.compose)
-
-    // Hilt
-    implementation(libs.hilt.android)
-    ksp(libs.hilt.android.compiler)
-    implementation(libs.androidx.hilt.navigation.compose)
-
-    // Room
+    // Room JVM + Bundled SQLite Driver
     implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.sqlite.bundled)
+    add("ksp", libs.androidx.room.compiler)
 
-    ksp(libs.androidx.hilt.compiler)
-
-    // AppCompat (per-app locale on API 21+)
-    implementation(libs.androidx.appcompat)
-
-    // kotlinx.serialization
+    // Coroutines + Serialization + Inject + Reflection (for lightweight DI)
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.swing)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.javax.inject)
+    implementation(libs.kotlin.reflect)
 
-    // Unit testing (JVM, no device required)
+    // Unit testing (JVM)
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test.junit)
-
-    // Room migration testing under Robolectric (runs on the JVM, no emulator)
-    testImplementation(libs.robolectric)
-    testImplementation(libs.androidx.test.core)
-    testImplementation(libs.androidx.test.ext.junit)
 }
+
+compose.desktop {
+    application {
+        mainClass = "com.fantasyidler.DesktopMainKt"
+        nativeDistributions {
+            targetFormats(TargetFormat.Exe, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Dmg)
+            packageName = "IdleFantasy"
+            packageVersion = "1.15.7"
+        }
+    }
+}
+

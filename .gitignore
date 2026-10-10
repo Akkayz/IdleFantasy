@@ -1,3 +1,4 @@
+.agents
 *.iml
 .gradle
 /local.properties
@@ -22,3 +23,5 @@ keystore.p12
 scripts/release_apk.sh
 *.md.backup
 /_verify_i18n.py
+data/
+gradle/wrapper/java-version-fix.jar

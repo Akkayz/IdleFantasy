@@ -1,7 +1,5 @@
 package com.fantasyidler.ui.screen
 
-import android.view.Gravity
-import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -22,18 +20,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.window.Popup
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -103,29 +98,12 @@ fun AppBannerEffect(message: String?, key: Any?, onConsumed: () -> Unit) {
 
 private const val BANNER_DISPLAY_MS = 2_500L
 
-/**
- * Hosted once at the navigation root so banners persist across screen changes. Rendered in
- * its own Dialog window (non-modal, no scrim) rather than as regular content, because a
- * ModalBottomSheet or AlertDialog opens its own Android window above normal screen content --
- * a banner drawn as a plain Composable overlay would be invisible behind either of those.
- *
- * The window is sized to wrap its content (full width, only as tall as the banner itself)
- * rather than the full screen -- a MATCH_PARENT window would swallow every touch on screen
- * (swipe-to-scroll, pulling down the notification shade) since FLAG_NOT_TOUCH_MODAL only lets
- * touches outside the window's bounds pass through, not touches that land on empty space
- * inside it.
- */
 @Composable
 fun AppBannerHost() {
     val current by AppBannerCenter.current.collectAsState()
-    val hostView = LocalView.current
 
     LaunchedEffect(current) {
-        current?.let { shown ->
-            // Banners replaced Toasts, which TalkBack announced on its own. The banner's
-            // window is non-focusable, so screen readers say nothing without an explicit
-            // announcement (#1241).
-            hostView.announceForAccessibility(shown.message)
+        current?.let {
             delay(BANNER_DISPLAY_MS)
             AppBannerCenter.dismissCurrent()
         }
@@ -133,30 +111,9 @@ fun AppBannerHost() {
 
     val banner = current ?: return
 
-    Dialog(
-        onDismissRequest = { AppBannerCenter.dismissCurrent() },
-        properties = DialogProperties(
-            dismissOnBackPress      = false,
-            dismissOnClickOutside   = false,
-            usePlatformDefaultWidth = false,
-        ),
+    Popup(
+        alignment = Alignment.TopCenter,
     ) {
-        val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
-        SideEffect {
-            dialogWindow?.let { window ->
-                window.setGravity(Gravity.TOP)
-                window.setDimAmount(0f)
-                window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-                // NOT_FOCUSABLE keeps key input (the system back press) routed to the
-                // window below; a focusable banner window swallowed back presses for
-                // its whole display time (issue #1212). Tap-to-dismiss is positional
-                // touch, so it is unaffected.
-                window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
-                window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-                window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            }
-        }
-
         var visible by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) { visible = true }
 
